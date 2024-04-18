@@ -1889,8 +1889,7 @@ coap_read_session(coap_context_t *ctx, coap_session_t *session, coap_tick_t now)
         coap_session_disconnected(session, COAP_NACK_ICMP_ISSUE);
     } else if (bytes_read > 0) {
       session->last_rx_tx = now;
-      memcpy(&session->addr_info, &packet->addr_info,
-             sizeof(session->addr_info));
+      /* coap_netif_dgrm_read() updates session->addr_info from packet->addr_info */
       coap_handle_dgram_for_proto(ctx, session, packet);
     }
 #if !COAP_DISABLE_TCP
@@ -3138,6 +3137,9 @@ handle_request(coap_context_t *context, coap_session_t *session, coap_pdu_t *pdu
   if (async && pdu->type == COAP_MESSAGE_CON)
     response->type = COAP_MESSAGE_CON;
 #endif /* COAP_ASYNC_SUPPORT */
+  /* A lot of the reliable code assumes type is CON */
+  if (COAP_PROTO_RELIABLE(session->proto) && response->type != COAP_MESSAGE_CON)
+    response->type = COAP_MESSAGE_CON;
 
   if (!coap_add_token(response, pdu->actual_token.length,
                       pdu->actual_token.s)) {

@@ -578,6 +578,7 @@ coap_io_process(coap_context_t *ctx, uint32_t timeout_ms) {
 }
 
 #if !defined(WITH_LWIP)
+#ifdef HAVE_SYS_SELECT_H
 int
 coap_io_process_with_fds(coap_context_t *ctx, uint32_t timeout_ms,
                          int enfds, fd_set *ereadfds, fd_set *ewritefds,
@@ -590,6 +591,7 @@ coap_io_process_with_fds(coap_context_t *ctx, uint32_t timeout_ms,
   coap_lock_unlock(ctx);
   return ret;
 }
+#endif /* HAVE_SYS_SELECT_H */
 #endif /* WITH_LWIP */
 
 uint16_t
@@ -760,11 +762,11 @@ coap_session_send_ping(coap_session_t *session) {
 #if COAP_THREAD_RECURSIVE_CHECK
 void
 coap_lock_unlock_func(coap_lock_t *lock, const char *file, int line) {
+  assert(coap_thread_pid == lock->pid);
   if (lock->in_callback) {
     assert(lock->lock_count > 0);
     lock->lock_count--;
   } else {
-    assert(lock->pid != 0);
     lock->pid = 0;
     lock->unlock_file = file;
     lock->unlock_line = line;
@@ -775,52 +777,63 @@ coap_lock_unlock_func(coap_lock_t *lock, const char *file, int line) {
 int
 coap_lock_lock_func(coap_lock_t *lock, const char *file, int line) {
   if (coap_mutex_trylock(&lock->mutex)) {
-    if (lock->in_callback) {
-      if (coap_thread_pid != lock->pid) {
-        coap_mutex_lock(&lock->mutex);
-      } else {
+    if (coap_thread_pid == lock->pid) {
+      /* This thread locked the mutex */
+      if (lock->in_callback) {
+        /* This is called from within an app callback */
         lock->lock_count++;
         assert(lock->in_callback == lock->lock_count);
-      }
-    } else {
-      if (coap_thread_pid == lock->pid) {
+        return 1;
+      } else {
         coap_log_alert("Thread Deadlock: Last %s: %u, this %s: %u\n",
                        lock->lock_file, lock->lock_line, file, line);
         assert(0);
       }
-      coap_mutex_lock(&lock->mutex);
-      lock->pid = coap_thread_pid;
-      lock->lock_file = file;
-      lock->lock_line = line;
     }
-    if (lock->being_freed) {
-      coap_lock_unlock_func(lock, file, line);
-      return 0;
-    }
-  } else {
-    lock->pid = coap_thread_pid;
-    lock->lock_file = file;
-    lock->lock_line = line;
+    /* Wait for the other thread to unlock */
+    coap_mutex_lock(&lock->mutex);
+  }
+  /* Just got the lock, so should not be in a locked callback */
+  assert(!lock->in_callback);
+  lock->pid = coap_thread_pid;
+  lock->lock_file = file;
+  lock->lock_line = line;
+  if (lock->being_freed) {
+    /* context is in the process of being deleted */
+    coap_lock_unlock_func(lock, file, line);
+    return 0;
   }
   return 1;
 }
-#else /* COAP_THREAD_RECURSIVE_CHECK */
+
+#else /* ! COAP_THREAD_RECURSIVE_CHECK */
+
 void
 coap_lock_unlock_func(coap_lock_t *lock) {
+  assert(coap_thread_pid == lock->pid);
   if (lock->in_callback) {
     assert(lock->lock_count > 0);
     lock->lock_count--;
   } else {
+    lock->pid = 0;
     coap_mutex_unlock(&lock->mutex);
   }
 }
 
 int
 coap_lock_lock_func(coap_lock_t *lock) {
-  if (lock->in_callback) {
+  /*
+   * Some OS do not have support for coap_mutex_trylock() so
+   * cannot use that here and have to rely on lock-pid being stable
+   */
+  if (lock->in_callback && coap_thread_pid == lock->pid) {
     lock->lock_count++;
+    assert(lock->in_callback == lock->lock_count);
   } else {
     coap_mutex_lock(&lock->mutex);
+    /* Just got the lock, so should not be in a locked callback */
+    assert(!lock->in_callback);
+    lock->pid = coap_thread_pid;
     if (lock->being_freed) {
       coap_lock_unlock_func(lock);
       return 0;
@@ -828,8 +841,7 @@ coap_lock_lock_func(coap_lock_t *lock) {
   }
   return 1;
 }
-#endif /* COAP_THREAD_RECURSIVE_CHECK */
-
+#endif /* ! COAP_THREAD_RECURSIVE_CHECK */
 
 #else /* ! COAP_THREAD_SAFE */
 

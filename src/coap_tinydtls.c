@@ -224,17 +224,17 @@ get_session_addr(const session_t *s, coap_address_t *a) {
   a->port = s->port;
 #elif defined(WITH_RIOT_SOCK)
   if (s->addr.family == AF_INET6) {
-    a->size = (socklen_t)sizeof(a->addr.sin6);
-    a->addr.sa.sa_family = s->addr.family;
-    memcpy(&a->addr.sin6.sin6_addr, &s->addr.ipv6,
-           sizeof(a->addr.sin6.sin6_addr));
-    a->addr.sin6.sin6_port = s->addr.port;
+    a->riot.family = s->addr.family;
+    memcpy(&a->riot.addr.ipv6, &s->addr.ipv6,
+           sizeof(a->riot.addr.ipv6));
+    a->riot.port = ntohs(s->addr.port);
+    a->riot.netif = 0;
 #ifdef SOCK_HAS_IPV4
   } else if (s->addr.family == AF_INET) {
-    a->addr.sa.sa_family = s->addr.family;
-    a->size = (socklen_t)sizeof(a->addr.sin);
-    memcpy(&a->addr.sin.sin_addr, &s->addr.ipv4, sizeof(a->addr.sin.sin_addr));
-    a->addr.sin.sin_port = s->addr.port;
+    a->riot.family = s->addr.family;
+    memcpy(&a->riot.addr.ipv4, &s->addr.ipv4, sizeof(a->riot.addr.ipv4));
+    a->riot.port = ntohs(s->addr.port);
+    a->riot.netif = 0;
 #endif /* SOCK_HAS_IPV4 */
   }
 #else /* ! WITH_CONTIKI && ! WITH_LWIP && ! WITH_RIOT_SOCK */
@@ -258,18 +258,18 @@ put_session_addr(const coap_address_t *a, session_t *s) {
   s->addr = a->addr;
   s->port = a->port;
 #elif defined(WITH_RIOT_SOCK)
-  if (a->addr.sa.sa_family == AF_INET6) {
-    s->size = (socklen_t)sizeof(s->addr.ipv6);
-    s->addr.family = a->addr.sa.sa_family;
-    memcpy(&s->addr.ipv6, &a->addr.sin6.sin6_addr,
+  if (a->riot.family == AF_INET6) {
+    s->size = sizeof(s->addr.ipv6);
+    s->addr.family = a->riot.family;
+    memcpy(&s->addr.ipv6, &a->riot.addr.ipv6,
            sizeof(s->addr.ipv6));
-    s->addr.port = a->addr.sin6.sin6_port;
+    s->addr.port = htons(a->riot.port);
 #ifdef SOCK_HAS_IPV4
-  } else if (a->addr.sa.sa_family == AF_INET) {
-    s->size = (socklen_t)sizeof(s->addr.ipv4);
-    s->addr.family = a->addr.sa.sa_family;
-    memcpy(&a->addr.ipv4, &s->addr.sin.sin_addr, sizeof(a->addr.ipv4));
-    s->addr.port = a->addr.sin.sin_port;
+  } else if (a->r.family == AF_INET) {
+    s->size = sizeof(s->addr.ipv4);
+    s->addr.family = a->r.family;
+    memcpy(&a->addr.ipv4, &s->r.addr.ipv4, sizeof(a->addr.ipv4));
+    s->addr.port = htons(a->r.port);
 #endif /* SOCK_HAS_IPV4 */
   }
 #else /* ! WITH_CONTIKI && ! WITH_LWIP && ! WITH_RIOT_SOCK */
@@ -323,6 +323,8 @@ dtls_application_data(struct dtls_context_t *dtls_context,
     return -1;
   }
 
+  coap_log_debug("*  %s: dtls:  recv %4d bytes\n",
+                 coap_session_str(coap_session), (int)len);
   return coap_handle_dgram(coap_context, coap_session, data, len);
 }
 
@@ -773,6 +775,8 @@ coap_dtls_send(coap_session_t *session,
   assert(dtls_context);
 
   coap_event_dtls = -1;
+  coap_log_debug("*  %s: dtls:  sent %4d bytes\n",
+                 coap_session_str(session), (int)data_len);
   /* Need to do this to not get a compiler warning about const parameters */
   memcpy(&data_rw, &data, sizeof(data_rw));
   res = dtls_write(dtls_context,
@@ -791,14 +795,6 @@ coap_dtls_send(coap_session_t *session,
       coap_session_disconnected(session, COAP_NACK_TLS_FAILED);
   }
 
-  if (res > 0) {
-    if (res == (ssize_t)data_len)
-      coap_log_debug("*  %s: dtls:  sent %4d bytes\n",
-                     coap_session_str(session), res);
-    else
-      coap_log_debug("*  %s: dtls:  sent %4d of %4zd bytes\n",
-                     coap_session_str(session), res, data_len);
-  }
   return res;
 }
 
@@ -864,8 +860,10 @@ coap_dtls_receive(coap_session_t *session,
       coap_handle_event(session->context, coap_event_dtls, session);
     if (coap_event_dtls == COAP_EVENT_DTLS_CONNECTED)
       coap_session_connected(session);
-    else if (coap_event_dtls == COAP_EVENT_DTLS_CLOSED || coap_event_dtls == COAP_EVENT_DTLS_ERROR)
+    else if (coap_event_dtls == COAP_EVENT_DTLS_CLOSED || coap_event_dtls == COAP_EVENT_DTLS_ERROR) {
       coap_session_disconnected(session, COAP_NACK_TLS_FAILED);
+      err = -1;
+    }
   }
 
   return err;
